@@ -25,8 +25,6 @@ class CouchUploader():
     except couchdb.ResourceNotFound:
         self.db = self.couch.create(self.databaseName)
 
-
-
   def uploadDirectoryToDocument(self,directory,documentID):
     """Walk through directory for files and copy
     them into the database as attachments to the given document
@@ -41,33 +39,87 @@ class CouchUploader():
     # documents if they already exist
 
     # create the document
-    document = self.db.get(documentID)
-    if document:
-      self.db.delete(document)
-    documentJSON = {
+    documentJSON = self.db.get(documentID)
+    #if document:
+    #  self.db.delete(document)
+    if not documentJSON:
+      documentJSON = {
         '_id' : documentID,
-        'fromDirectory' : directory
-      }
-    self.db.save(documentJSON)
+        'fromDirectory' : directory,
+        'attachments_md5s': {},
+        '_attachments': {}
+        }
+    #self.db.save(documentJSON)
 
-    # put the attachments onto the document
+    '''
+    for each document in the directory
+      if no md5 for this document:
+        put as new attachment
+        include md5
+      if md5 exists and is different:
+        put as attachment
+        update md5
+        set stubs for all existing documents
+      else md5 exists and is the same
+        do nothing
+
+    Note that attachments in couchdb already have md5 hashes associated, but
+     I was not able to replicate these hashes using python md5 functionality.
+
+    '''
+
+    documentsAdded = []
     for root, dirs, files in os.walk(directory):
         for fileName in files:
             if fileName.startswith('.'):
                 continue
             fileNamePath = os.path.join(root,fileName)
+            print 'Processsing ',fileNamePath
             try:
                 relPath = os.path.relpath(fileNamePath, directory)
-                fp = open(fileNamePath, "rb")
-                self.db.put_attachment(documentJSON, fp, relPath)
-                fp.close()
+                documentsAdded.append(relPath)
+                from hashlib import md5
+                fTmp = open(fileNamePath,'rb')
+                currentmd5 = md5(fTmp.read()).digest().encode('hex')[:-1]
+                if (not relPath in documentJSON['attachments_md5s'].keys()):
+                  print('Uploading %s with md5 %s' % (relPath,currentmd5))
+                  documentJSON['attachments_md5s'][relPath] = currentmd5
+                  self.db.save(documentJSON)
+                  documentJSON = self.db.get(documentID)
+                  fp = open(fileNamePath,'rb')
+                  self.db.put_attachment(documentJSON, fp, relPath)
+                  documentJSON = self.db.get(documentID)
+                elif documentJSON['attachments_md5s'][relPath] != currentmd5:
+                  print('Updating %s with md5 %s' % (relPath,currentmd5))
+                  documentJSON['attachments_md5s'][relPath] = currentmd5
+                  self.db.save(documentJSON)
+                  documentJSON = self.db.get(documentID)
+                  fp = open(fileNamePath,'rb')
+                  self.db.put_attachment(documentJSON, fp, relPath)
+                else:
+                  if documentJSON['attachments_md5s'][relPath] != currentmd5:
+                    print 'Something is wrong!'
 
             except Exception, e:
                 print ("Couldn't attach file %s" % fileNamePath)
                 print str(e)
                 traceback.print_exc()
                 continue
-
+              
+    # go over all documents and remove those not in the current tree
+    documentJSON = self.db.get(documentID)
+    attachmentsList = documentJSON['attachments_md5s'].keys()
+    for doc in documentsAdded:
+      attachmentsList.remove(doc)
+    for docToRemove in attachmentsList:
+      documentJSON['attachments_md5s'].pop(docToRemove, None)
+    self.db.save(documentJSON)
+    documentJSON = self.db.get(documentID)
+    for docToRemove in attachmentsList:
+      self.db.delete_attachment(documentJSON, docToRemove)
+      documentJSON = self.db.get(documentID)
+      print 'Removed attachment for ', docToRemove
+        
   def uploadDesignDocuments(self,directory):
     """
     For each python file in the directory create a design document based
